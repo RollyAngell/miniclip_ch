@@ -6,13 +6,13 @@ This project implements a complete real-time data processing pipeline for gaming
 
 | Phase | Component | Status | Description |
 |-------|-----------|--------|-------------|
-| **Phase I** | **Infrastructure & Batch** | ✅ Completed | Docker environment, Data Generator, Spark Batch Job (Daily Unique Users). |
-| **Phase II** | **Real-Time Data Quality** | ✅ Completed | Python service (Kafka Streams style) that cleans and enriches data in real-time. |
-| **Phase III** | **Real-Time Aggregation** | ✅ Completed | Spark Structured Streaming job calculating minute-level financial and user metrics. |
+| **Phase I** | **Infrastructure & Batch**  | Docker environment, Data Generator, Spark Batch Job (Daily Unique Users). |
+| **Phase II** | **Real-Time Data Quality** | Python service (Kafka Streams style) that cleans and enriches data in real-time. |
+| **Phase III** | **Real-Time Aggregation** | Spark Structured Streaming job calculating minute-level financial and user metrics. |
 
 ---
 
-## 🏗 Architecture
+## Architecture
 
 The system follows a **Lambda/Kappa Hybrid Architecture** completely containerized with Docker. It separates the ingestion, cleaning (ETL), and analysis layers (Batch & Streaming).
 
@@ -68,7 +68,7 @@ graph LR
 
 ---
 
-## 📂 Project Structure
+## Project Structure
 
 - **`src/`**
   - **`data_generator.py`**: (Phase I) Simulates game events and publishes them to Kafka topic `events-raw`.
@@ -81,7 +81,7 @@ graph LR
 
 ---
 
-## 🚀 How to Run the Full Pipeline
+## How to Run the Full Pipeline
 
 ### 1. Start the Environment
 Build and start all services. The data generator starts automatically.
@@ -114,7 +114,7 @@ docker exec miniclip-app python src/stream_aggregation.py
 
 ---
 
-## 📊 Execution Results (Demo)
+## Execution Results (Demo)
 
 ### 1. Phase I Output (Daily Batch)
 *Example output showing distinct users aggregated by day, country, and platform.*
@@ -169,7 +169,7 @@ docker exec miniclip-app python src/stream_aggregation.py
 
 ---
 
-## 🛠 Tech Stack
+## Tech Stack
 - **Language**: Python 3.9
 - **Streaming**: Kafka, Spark Structured Streaming
 - **Processing**: Apache Spark 3.5.0
