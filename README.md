@@ -19,23 +19,23 @@ The system follows a **Lambda/Kappa Hybrid Architecture** completely containeriz
 ```mermaid
 graph LR
     subgraph Source
-        GEN[Data Generator<br/>(Python)]
+        GEN["Data Generator<br/>(Python)"]
     end
 
     subgraph "Ingestion & Data Quality Layer"
         RAW[("Kafka Topic:<br/>events-raw")]
-        DQ[Data Quality Service<br/>(ETL - Python)]
+        DQ["Data Quality Service<br/>(ETL - Python)"]
         ENR[("Kafka Topic:<br/>events-enriched")]
     end
 
     subgraph "Analytics Layer"
-        BATCH[Spark Batch Job<br/>(Daily Aggregation)]
-        STREAM[Spark Streaming Job<br/>(Real-Time KPIs)]
+        BATCH["Spark Batch Job<br/>(Daily Aggregation)"]
+        STREAM["Spark Streaming Job<br/>(Real-Time KPIs)"]
     end
 
     subgraph "Output"
-        REP1[Console Report:<br/>Daily Active Users]
-        REP2[Live Dashboard:<br/>Revenue & Users / Min]
+        REP1["Console Report:<br/>Daily Active Users"]
+        REP2["Live Dashboard:<br/>Revenue & Users / Min"]
     end
 
     %% Flow Connections
