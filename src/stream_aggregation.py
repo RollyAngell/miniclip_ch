@@ -1,159 +1,138 @@
-from pyspark.sql import SparkSession
-from pyspark.sql.functions import from_json, col, window, count, sum as spark_sum, approx_count_distinct
-from pyspark.sql.types import StructType, StructField, StringType, LongType, IntegerType, DoubleType
 import os
+import sys
+import logging
+from pyspark.sql import SparkSession, DataFrame
+from pyspark.sql.functions import from_json, col, window, count, sum as spark_sum, approx_count_distinct
+from pyspark.sql.types import StructType, StructField, StringType, LongType, DoubleType
 
-# --- Configuration ---
-KAFKA_BOOTSTRAP_SERVERS = os.getenv('KAFKA_BOOTSTRAP_SERVERS', 'kafka:29092')
-SOURCE_TOPIC = 'events-enriched'  # Reading from the cleaned topic
+# --- Logging Configuration ---
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
+logger = logging.getLogger(__name__)
 
-def get_spark_session():
-    """Initializes Spark Session with Kafka dependencies."""
-    return SparkSession.builder \
-        .appName("MiniclipRealTimeAggregator") \
-        .master("spark://spark-master:7077") \
-        .config("spark.jars.packages", "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0") \
-        .config("spark.sql.shuffle.partitions", "2") \
-        .getOrCreate()
+# --- General Configuration ---
+class Config:
+    KAFKA_BOOTSTRAP = os.getenv('KAFKA_BOOTSTRAP_SERVERS', 'kafka:29092')
+    SPARK_MASTER = os.getenv('SPARK_MASTER', 'spark://spark-master:7077')
+    SOURCE_TOPIC = 'events-enriched'
+    APP_NAME = "MiniclipRealTimeAggregator"
+    SHUFFLE_PARTITIONS = "2"
+    WINDOW_DURATION = "1 minute"
+    TRIGGER_INTERVAL = "1 minute"
+    KAFKA_PKG = "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0"
 
-def get_schemas():
-    """Defines Schemas for different event types based on provided JSON schemas."""
-    
-    # Common fields that exist in the wrapper JSON string
-    # We will need to parse the JSON value first to get event type
-    
-    # Schema for 'in-app-purchase' (Revenue & Count)
-    purchase_schema = StructType([
+def get_spark_session() -> SparkSession:
+    """Initializes and returns Spark Session with Kafka dependencies."""
+    try:
+        session = SparkSession.builder \
+            .appName(Config.APP_NAME) \
+            .master(Config.SPARK_MASTER) \
+            .config("spark.jars.packages", Config.KAFKA_PKG) \
+            .config("spark.sql.shuffle.partitions", Config.SHUFFLE_PARTITIONS) \
+            .getOrCreate()
+        session.sparkContext.setLogLevel("WARN")
+        return session
+    except Exception as e:
+        logger.error(f"Error initializing Spark Session: {e}")
+        sys.exit(1)
+
+def get_super_schema() -> StructType:
+    """Defines unified schema for parsing events."""
+    return StructType([
         StructField("event-type", StringType(), True),
-        StructField("time", LongType(), True),
+        StructField("time", LongType(), True),  # Unix timestamp
         StructField("purchase_value", DoubleType(), True),
         StructField("user-id", StringType(), True),
-        StructField("country", StringType(), True), # Assuming country is added/enriched if available in context
+        StructField("country", StringType(), True),
+        StructField("platform", StringType(), True),
         StructField("product-id", StringType(), True)
     ])
 
-    # Schema for 'init' (Users & Country)
-    init_schema = StructType([
-        StructField("event-type", StringType(), True),
-        StructField("time", LongType(), True),
-        StructField("user-id", StringType(), True),
-        StructField("country", StringType(), True),
-        StructField("platform", StringType(), True)
-    ])
-
-    # Schema for 'match' (Match counts by country)
-    # Note: Matches are tricky because they don't have a top-level 'country'. 
-    # We might need to join or assume 'init' provided user location context. 
-    # However, for this task, we will assume we can aggregate based on available fields or 
-    # if the enrichment phase added context.
-    # If enrichment didn't add country to match, we can't aggregate matches by country easily without stateful join.
-    # Let's assume for this specific KPI we look at init events or if we can extract it.
-    
-    # Wait, the requirements say: "The number of matches by country. The country field should already be transformed."
-    # This implies the match event HAS a country field, or we should have enriched it.
-    # Our data generator Match event DOES NOT have a root 'country' field.
-    # It has 'user-a-postmatch-info' -> device/platform.
-    # To strictly follow "matches by country", we would need to join with user metadata.
-    # However, to keep it simple within the scope of the provided Generator/Schemas:
-    # We will focus on the KPIs we CAN calculate directly or infer.
-    
-    return purchase_schema, init_schema
-
-def main():
-    spark = get_spark_session()
-    spark.sparkContext.setLogLevel("WARN")
-
-    print(f"--- Starting Real-Time Aggregator reading from {SOURCE_TOPIC} ---")
-
-    # 1. Read Stream from Kafka
-    df_raw = spark.readStream \
+def read_kafka_stream(spark: SparkSession) -> DataFrame:
+    """Reads stream from Kafka."""
+    return spark.readStream \
         .format("kafka") \
-        .option("kafka.bootstrap.servers", KAFKA_BOOTSTRAP_SERVERS) \
-        .option("subscribe", SOURCE_TOPIC) \
+        .option("kafka.bootstrap.servers", Config.KAFKA_BOOTSTRAP) \
+        .option("subscribe", Config.SOURCE_TOPIC) \
         .option("startingOffsets", "latest") \
         .load()
 
-    # 2. Cast value to String
-    df_str = df_raw.selectExpr("CAST(value AS STRING) as json_value", "timestamp")
-
-    # 3. We need to handle multiple schemas in one topic.
-    # Strategy: Parse generic fields first to identify event type, or parse everything as flexible structure.
-    # Here we will use get_json_object to peek at event-type before full parsing or simple conditional logic.
+def parse_and_watermark(df_raw: DataFrame) -> DataFrame:
+    """Parses JSON and applies watermark based on event time."""
+    schema = get_super_schema()
     
-    # However, to keep it clean and robust, we can parse specific subsets for specific KPIs.
-    
-    # --- KPI A: Minute Aggregated Data (Purchases & Revenue) ---
-    # We define a strict schema that covers purchase fields. 
-    # Non-matching fields will be null, but that's fine for filtering.
-    
-    # Let's use a Super Schema that covers all necessary fields for our aggregations
-    super_schema = StructType([
-        StructField("event-type", StringType(), True),
-        StructField("time", LongType(), True), # Unix timestamp
-        StructField("purchase_value", DoubleType(), True),
-        StructField("user-id", StringType(), True),
-        StructField("country", StringType(), True),
-        StructField("platform", StringType(), True)
-    ])
+    # Cast to String and parse JSON
+    df_parsed = df_raw.selectExpr("CAST(value AS STRING) as json_value") \
+        .withColumn("data", from_json(col("json_value"), schema)) \
+        .select("data.*")
 
-    df_parsed = df_str.withColumn("data", from_json(col("json_value"), super_schema)) \
-        .select("data.*", "timestamp") # Kafka timestamp is an approximation, but better to use event time
+    # Create event_time timestamp column and apply watermark
+    return df_parsed.withColumn("event_time", (col("time").cast("timestamp"))) \
+        .withWatermark("event_time", Config.WINDOW_DURATION)
 
-    # Add a proper event_time column from the 'time' field (unix long) for windowing
-    df_with_watermark = df_parsed.withColumn("event_time", (col("time").cast("timestamp"))) \
-        .withWatermark("event_time", "1 minute")
-
-    # --- Aggregation Logic ---
-    
-    # 1. Count of all purchases & Sum of all revenue (per minute)
-    # Filter for purchase events
-    df_purchases = df_with_watermark.filter(col("event-type") == "in-app-purchase")
-    
-    agg_financials = df_purchases.groupBy(window(col("event_time"), "1 minute")) \
-        .agg(
-            count("*").alias("total_purchases"),
-            spark_sum("purchase_value").alias("total_revenue")
-        )
-
-    # 2. Number of distinct users (per minute)
-    # We can count distinct users seen in ANY event type within that minute
-    agg_users = df_with_watermark.groupBy(window(col("event_time"), "1 minute")) \
-        .agg(approx_count_distinct("user-id").alias("distinct_users"))
-
-    # 3. Country Revenue (per minute)
-    # Filter purchases and group by country
-    agg_country_revenue = df_purchases.groupBy(window(col("event_time"), "1 minute"), "country") \
-        .agg(spark_sum("purchase_value").alias("country_revenue"))
-
-    # --- Output to Console ---
-    
-    print("--- Streaming Query: Financials (Revenue & Purchases) ---")
-    query_financials = agg_financials.writeStream \
+def start_console_query(df: DataFrame, query_name: str):
+    """Starts a streaming query with console output."""
+    logger.info(f"Starting query: {query_name}")
+    return df.writeStream \
         .outputMode("update") \
         .format("console") \
         .option("truncate", "false") \
-        .trigger(processingTime="1 minute") \
+        .trigger(processingTime=Config.TRIGGER_INTERVAL) \
+        .queryName(query_name) \
         .start()
 
-    print("--- Streaming Query: Distinct Users ---")
-    query_users = agg_users.writeStream \
-        .outputMode("update") \
-        .format("console") \
-        .option("truncate", "false") \
-        .trigger(processingTime="1 minute") \
-        .start()
+def main():
+    spark = get_spark_session()
+    logger.info(f"--- Starting Real-Time Aggregator reading from {Config.SOURCE_TOPIC} ---")
 
-    print("--- Streaming Query: Revenue by Country ---")
-    query_country_rev = agg_country_revenue.writeStream \
-        .outputMode("update") \
-        .format("console") \
-        .option("truncate", "false") \
-        .trigger(processingTime="1 minute") \
-        .start()
+    try:
+        # 1. Initial Reading and Processing
+        df_raw = read_kafka_stream(spark)
+        df_processed = parse_and_watermark(df_raw)
 
-    # Wait for all streams
-    spark.streams.awaitAnyTermination()
+        # 2. Definition of filtered DataFrames
+        df_purchases = df_processed.filter(col("event-type") == "in-app-purchase")
+        df_matches = df_processed.filter(col("event-type") == "match")
+
+        # 3. Aggregation Logic
+        
+        # KPI A: Financial Totals (Purchases & Revenue) per minute
+        agg_financials = df_purchases.groupBy(window(col("event_time"), Config.WINDOW_DURATION)) \
+            .agg(
+                count("*").alias("total_purchases"),
+                spark_sum("purchase_value").alias("total_revenue")
+            )
+
+        # KPI B: Distinct Users per minute (considering any event)
+        agg_users = df_processed.groupBy(window(col("event_time"), Config.WINDOW_DURATION)) \
+            .agg(approx_count_distinct("user-id").alias("distinct_users"))
+
+        # KPI C: Revenue by Country per minute
+        agg_country_revenue = df_purchases.groupBy(window(col("event_time"), Config.WINDOW_DURATION), "country") \
+            .agg(spark_sum("purchase_value").alias("country_revenue"))
+
+        # KPI D: Matches by Country per minute
+        agg_matches_country = df_matches.groupBy(window(col("event_time"), Config.WINDOW_DURATION), "country") \
+            .agg(count("*").alias("total_matches"))
+
+        # 4. Start Streams
+        queries = [
+            start_console_query(agg_financials, "Financials"),
+            start_console_query(agg_users, "Distinct Users"),
+            start_console_query(agg_country_revenue, "Revenue by Country"),
+            start_console_query(agg_matches_country, "Matches by Country")
+        ]
+
+        spark.streams.awaitAnyTermination()
+
+    except KeyboardInterrupt:
+        logger.info("Stopping streams by user request...")
+    except Exception as e:
+        logger.error(f"Critical error in stream execution: {e}", exc_info=True)
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
-
