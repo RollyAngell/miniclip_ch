@@ -4,8 +4,8 @@ This project implements a complete real-time data processing pipeline for gaming
 
 ## Project Status
 
-| Phase | Component | Status | Description |
-|-------|-----------|--------|-------------|
+| Phase | Component | Description |
+|-------|-----------|-------------|
 | **Phase I** | **Infrastructure & Batch**  | Docker environment, Data Generator, Spark Batch Job (Daily Unique Users). |
 | **Phase II** | **Real-Time Data Quality** | Python service (Kafka Streams style) that cleans and enriches data in real-time. |
 | **Phase III** | **Real-Time Aggregation** | Spark Structured Streaming job calculating minute-level financial and user metrics. |
