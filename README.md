@@ -2,7 +2,7 @@
 
 This project implements a complete real-time data processing pipeline for gaming events (`Init`, `Match`, `InAppPurchase`). It covers data generation, batch processing, real-time data quality enrichment, and real-time aggregation.
 
-## Project Status
+## Project
 
 | Phase | Component | Description |
 |-------|-----------|-------------|
